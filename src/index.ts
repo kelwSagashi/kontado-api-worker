@@ -1,23 +1,17 @@
-import { fromHono } from "chanfana";
+import { PrismaD1 } from "@prisma/adapter-d1";
+import { PrismaClient } from "@prisma/client";
 import { Hono } from "hono";
-import { TaskCreate } from "./endpoints/taskCreate";
-import { TaskDelete } from "./endpoints/taskDelete";
-import { TaskFetch } from "./endpoints/taskFetch";
-import { TaskList } from "./endpoints/taskList";
+import { honoErrorHandler } from "middlewares/error.middleware";
+import testRoutes from "routes/test.routes";
+import { Bindings } from "types";
+
 
 // Start a Hono app
-const app = new Hono();
+const app = new Hono<{ Bindings: Bindings }>().basePath("/api");
 
-// Setup OpenAPI registry
-const openapi = fromHono(app, {
-	docs_url: "/",
-});
+app.route("/status", testRoutes);
 
-// Register OpenAPI endpoints
-openapi.get("/api/tasks", TaskList);
-openapi.post("/api/tasks", TaskCreate);
-openapi.get("/api/tasks/:taskSlug", TaskFetch);
-openapi.delete("/api/tasks/:taskSlug", TaskDelete);
+app.onError(honoErrorHandler);
 
 // Export the Hono app
 export default app;

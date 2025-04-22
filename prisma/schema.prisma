@@ -1,0 +1,586 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// --- Enums ---
+
+enum ReviewStatus {
+  PENDING // Aguardando votos/revisão da comunidade
+  VERIFIED // Aprovado/Verificado pela comunidade (não precisa mais de revisão)
+  REJECTED // Rejeitado pela comunidade
+  PROTESTED // Marcado com problema (requer atenção especial, talvez de admin)
+}
+
+// Novo: Status do Preço do Posto
+enum StationPriceStatus {
+  UNDER_REVIEW // Preço recém-reportado, aguardando revisão
+  ACTIVE // Preço verificado e considerado ativo/atual
+  REJECTED // Preço considerado incorreto ou spam pela comunidade
+  OUTDATED // Preço antigo (pode ser inferido por timestamp, mas status explícito pode ajudar)
+}
+
+// Manter ou ajustar: Status do Posto
+enum GasStationStatus {
+  UNDER_REVIEW // Posto recém-criado ou com edições significativas pendentes
+  ACTIVE // Posto verificado e ativo
+  INACTIVE // Posto fechado ou inativo
+  REJECTED // Criação do posto foi rejeitada (pode ser excluído ou marcado)
+}
+
+enum ReviewVote {
+  ACCEPT
+  REJECT
+  PROTEST // Indica que há algo fundamentalmente errado ou suspeito
+}
+
+// Novo: Razão/Tipo da Proposta (para contexto)
+enum ProposalReasonType {
+  INITIAL_CREATION // Proposta gerada na criação inicial da entidade
+  DATA_UPDATE // Proposta gerada devido a uma sugestão de atualização de dados
+  // Poderíamos adicionar outros no futuro, como FLAGGED_INCORRECT, etc.
+}
+
+// --- Novos Modelos RBAC ---
+
+model Role {
+  id           String   @id @default(uuid())
+  // Use nomes únicos e claros, ex: 'ADMIN', 'PREMIUM_USER', 'BASIC_USER'
+  name         String   @unique
+  description  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  // Relação com a tabela de junção RolePermission
+  permissions RolePermission[]
+  // Relação um-para-muitos com User (um Role pode ter muitos Users)
+  users       User[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id           String   @id @default(uuid())
+  // Nome único da permissão, ex: 'user:delete', 'vehicle:create', 'proposal:approve'
+  // Use uma convenção: <recurso>:<ação>:<escopo?> (ex: vehicle:read:own, user:update:any)
+  name         String   @unique
+  description  String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  // Relação com a tabela de junção RolePermission
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+// Tabela de Junção (Muitos-para-Muitos entre Role e Permission)
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  // Relações com as tabelas Role e Permission
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  assignedAt   DateTime @default(now()) // Quando a permissão foi atribuída a este role
+  createdInApp Boolean  @default(false)
+
+  // Chave primária composta para garantir que uma permissão só seja associada uma vez a um role
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// --- Modelos Principais ---
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  username     String   @unique
+  email        String   @unique
+  password     String // Armazenaremos o hash da senha
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  roleId String
+  // Relação muitos-para-um com Role (um User tem um Role)
+  role   Role   @relation(fields: [roleId], references: [id]) // onDelete: Restrict por padrão é bom aqui
+
+  // Campos para reset de senha
+  passwordResetToken   String?   @unique // Armazena o hash do token de reset
+  passwordResetExpires DateTime? // Data/hora de expiração do token
+
+  ownedVehicles          Vehicle[]                  @relation("OwnedVehicles") // Veículos que o usuário possui
+  authorizedVehicles     UserVehicleAuthorization[] // Veículos que o usuário está autorizado a gerenciar
+  createdGeneralExpenses GeneralExpense[] // Gastos gerais registrados pelo usuário
+  createdNotesReminders  NoteReminder[] // Notas/Lembretes criados pelo usuário
+  createdFuelings        Fueling[] // Abastecimentos registrados pelo usuário
+  userPoints             UserPoint[] // Pontos pessoais do usuário
+  budgets                Budget[]
+  trips                  Trip[]
+
+  // Interações com a comunidade
+  proposedStations        GasStationProposal[]   @relation("ProposedStations")
+  proposedPrices          StationPriceProposal[] @relation("ProposedPrices")
+  gasStationReviewsMade   GasStationReview[]     @relation("GasStationReviewsMade")
+  stationPriceReviewsMade StationPriceReview[]   @relation("StationPriceReviewsMade")
+
+  @@index([roleId]) // Adiciona um índice no campo role se for filtrar por ele frequentemente
+  @@map("users") // Nome da tabela no banco
+}
+
+model VehicleCategory {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  iconName     String // Nome do ícone (ex: 'car', 'motorcycle', 'truck')
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  vehicles Vehicle[] // Veículos nesta categoria
+
+  @@map("vehicle_categories")
+}
+
+model Vehicle {
+  id              String  @id @default(uuid())
+  alias           String
+  brand           String // Marca
+  model           String // Modelo
+  plate           String  @unique // Placa
+  kmlCity         Float? // KML Cidade (pode ser um path ou conteúdo, String é flexível)
+  kmlRoad         Float? // KML Estrada
+  yearManufacture Int // Ano de Fabricação
+  yearModel       Int // Ano do Modelo
+  color           String
+  appOdometer     Decimal @default(0.0) // Hodômetro registrado pelo app cliente (Float ou Decimal)
+  appFuelTank     Decimal @default(0.0) // tanque do veiculo registrado pelo app cliente (Float ou Decimal)
+
+  ownerId    String // Chave estrangeira para o proprietário
+  categoryId String // Chave estrangeira para a categoria do veículo
+
+  owner    User            @relation("OwnedVehicles", fields: [ownerId], references: [id], onDelete: Cascade) // Relacionamento com o proprietário
+  category VehicleCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict) // Relacionamento com a categoria
+
+  authorizedUsers UserVehicleAuthorization[] // Usuários autorizados a gerenciar este veículo
+  generalExpenses GeneralExpense[] // Gastos gerais associados
+  notesReminders  NoteReminder[] // Notas e lembretes associados
+  fuelings        Fueling[] // Abastecimentos associados
+  budgets         Budget[]
+  trips           Trip[]
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@map("vehicles")
+}
+
+// --- NOVO MODELO: Trip ---
+model Trip {
+  id                  String   @id @default(uuid())
+  startTime           DateTime // Hora de início da viagem/deslocamento
+  endTime             DateTime // Hora de fim da viagem/deslocamento
+  distance            Decimal // Distância percorrida (em km) - Fornecida pelo App
+  // Consumo calculado para esta viagem específica
+  fuelConsumed        Decimal
+  // Taxa de consumo (km/L) usada para calcular fuelConsumed (pode ser a da cidade/estrada do veículo ou uma customizada)
+  consumptionRateUsed Decimal
+  // Opcional: Rota/Trajeto (pode ser GeoJSON, Polyline, etc.)
+  routePath           Json? // Ou String? ou usar PostGIS LineString? Json é flexível.
+  notes               String? // Notas sobre a viagem
+
+  momentAppFuelTank Decimal @default(0.0)
+
+  vehicleId String // Veículo utilizado
+  userId    String // Usuário que registrou/realizou a viagem
+
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@index([vehicleId, startTime])
+  @@index([userId, startTime])
+  @@map("trips")
+}
+
+// Tabela de ligação para autorização de gerenciamento
+model UserVehicleAuthorization {
+  id        String @id @default(uuid())
+  userId    String
+  vehicleId String
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle Vehicle @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@unique([userId, vehicleId]) // Garante que um usuário só seja autorizado uma vez por veículo
+  @@map("user_vehicle_authorizations")
+}
+
+// --- Modelos de Gastos ---
+
+model Budget {
+  id        String   @id @default(uuid())
+  name      String // Ex: "Orçamento Mensal Out/23", "Gastos Viagem Férias"
+  amount    Decimal // Valor limite do orçamento
+  startDate DateTime // Data de início do período do orçamento
+  endDate   DateTime // Data de fim do período do orçamento
+  notes     String? // Observações opcionais
+
+  userId String // Usuário que criou o orçamento
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Orçamento pode ser para um veículo específico ou geral (vehicleId = null)
+  vehicleId String?
+  vehicle   Vehicle? @relation(fields: [vehicleId], references: [id], onDelete: Cascade) // Se veículo for deletado, orçamento associado também some
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@index([userId, startDate, endDate]) // Para buscar orçamentos do usuário por período
+  @@index([userId, vehicleId]) // Para buscar orçamentos do usuário por veículo
+  @@map("budgets")
+}
+
+model ExpenseCategory {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  iconName     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  generalExpenses GeneralExpense[]
+
+  @@map("expense_categories")
+}
+
+model GeneralExpense {
+  id          String   @id @default(uuid())
+  description String
+  cost        Decimal // Usar Decimal para valores monetários
+  expenseDate DateTime // Dia do gasto
+  notes       String? // Notas adicionais
+
+  vehicleId  String
+  categoryId String
+  userId     String // Quem registrou o gasto
+
+  vehicle  Vehicle         @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  category ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade) // Usuário que registrou
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@map("general_expenses")
+}
+
+// --- Modelos de Notas e Lembretes ---
+
+model NoteReminderType {
+  id           String   @id @default(uuid())
+  name         String   @unique // Ex: "Nota", "Problema", "Acidente", "Lembrete"
+  iconName     String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  notesReminders NoteReminder[]
+
+  @@map("note_reminder_types")
+}
+
+model NoteReminder {
+  id           String    @id @default(uuid())
+  title        String
+  note         String // Para textos potencialmente longos
+  creationDate DateTime  @default(now()) // Data de criação da nota/lembrete
+  reminderDate DateTime? // Data para o lembrete (opcional)
+  isRecurring  Boolean   @default(false) // Se o lembrete é recorrente
+
+  vehicleId String
+  typeId    String
+  userId    String // Quem criou
+
+  vehicle Vehicle          @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  type    NoteReminderType @relation(fields: [typeId], references: [id], onDelete: Restrict)
+  user    User             @relation(fields: [userId], references: [id], onDelete: Cascade) // Usuário que criou
+
+  todos Todo[] // Lista de To-Do's associados
+
+  createdAt    DateTime @default(now()) // Data de criação do registro no DB
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@map("notes_reminders")
+}
+
+model Todo {
+  id             String  @id @default(uuid())
+  name           String // Descrição da tarefa
+  isComplete     Boolean @default(false) // Status da tarefa
+  noteReminderId String
+
+  noteReminder NoteReminder @relation(fields: [noteReminderId], references: [id], onDelete: Cascade)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@map("todos")
+}
+
+// --- Modelos de Abastecimento ---
+
+model FuelType {
+  id           String   @id @default(uuid())
+  name         String   @unique // Ex: "Gasolina Comum", "Gasolina Aditivada", "Etanol", "Diesel S10"
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  fuelings      Fueling[]
+  stationPrices StationPrice[] // Preços associados a este tipo de combustível
+
+  @@map("fuel_types")
+}
+
+model Fueling {
+  id            String   @id @default(uuid())
+  cost          Decimal // Custo total do abastecimento
+  timestamp     DateTime @default(now()) // Data e hora do abastecimento
+  pricePerLiter Decimal
+
+  latitude  Float // Latitude decimal
+  longitude Float // Longitude decimal
+  // Opcional: Adicionar volume (Float) e hodometro (Float) se necessário no futuro
+
+  momentAppFuelTank Decimal @default(0.0)
+
+  vehicleId    String
+  fuelTypeId   String
+  userId       String // Quem registrou
+  gasStationId String?
+
+  // Adiciona a relação opcional com GasStation
+  vehicle    Vehicle     @relation(fields: [vehicleId], references: [id], onDelete: Cascade)
+  fuelType   FuelType    @relation(fields: [fuelTypeId], references: [id], onDelete: Restrict)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade) // Usuário que registrou
+  gasStation GasStation? @relation(fields: [gasStationId], references: [id], onDelete: SetNull)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@index([vehicleId, timestamp])
+  @@index([gasStationId])
+  @@index([latitude, longitude])
+  @@map("fuelings")
+}
+
+// --- Modelos de Pontos do Usuário ---
+
+model UserPoint {
+  id           String   @id @default(uuid())
+  name         String // Ex: "Casa", "Trabalho", "Academia"
+  latitude     Float // Latitude decimal
+  longitude    Float // Longitude decimal
+  // Campo de Geometria PostGIS (requer extensão PostGIS ativa no DB)
+  // SRID 4326 é o padrão para WGS 84 (GPS coords)
+  // location    Unsupported("geometry(Point, 4326)")? @map("location_geom")
+  address      String? // Endereço textual
+  description  String? // Descrição adicional
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@index([userId]) // Indexar por usuário para buscas rápidas
+  @@index([latitude, longitude])
+  // @@index([location], type: Gin) // Index espacial GIN/GIST é essencial para PostGIS
+  @@map("user_points")
+}
+
+// --- Modelos de Postos de Gasolina e Comunidade ---
+
+model GasStation {
+  id        String @id @default(uuid())
+  name      String
+  latitude  Float
+  longitude Float
+  // Campo de Geometria PostGIS
+  // location  Unsupported("geometry(Point, 4326)")? @map("location_geom")
+
+  // --- Normalized Address Fields ---
+  street       String // Logradouro (Rua, Avenida, etc.)
+  number       String  @default("SN") // Número (String for "SN", "123A", etc.)
+  complement   String? // Complemento (Apto, Sala, Bloco)
+  neighborhood String // Bairro
+  city         String // Cidade
+  state        String // Estado (UF - ex: "SP", "RJ")
+  postalCode   String? // CEP (Formato depende do país)
+  country      String  @default("BR") // País (Default 'BR' for Brazil)
+
+  status       GasStationStatus @default(UNDER_REVIEW) // Status atual do posto
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  createdInApp Boolean          @default(false)
+
+  prices              StationPrice[] // Histórico de preços reportados para este posto
+  gasStationProposals GasStationProposal[] // Link para as propostas DESTE posto
+  fuelings            Fueling[]
+
+  // Índices
+  @@index([status])
+  @@index([city, state])
+  // @@index([location], type: Gin) // Índice espacial
+  @@index([latitude, longitude])
+  @@map("gas_stations")
+}
+
+model StationPrice {
+  id           String   @id @default(uuid())
+  price        Decimal // Preço do combustível
+  reportedAt   DateTime @default(now()) // Quando este preço foi reportado/verificado
+  gasStationId String
+  fuelTypeId   String
+
+  // Status do próprio preço (controlado pelo resultado da revisão)
+  status StationPriceStatus @default(UNDER_REVIEW)
+
+  // Armazena as *mudanças* propostas para DATA_UPDATE.
+  // Para INITIAL_CREATION, os dados estão no próprio GasStation.
+  proposedData Json?
+  reportedById String // Usuário que reportou este preço específico (pode ser nulo se veio de outra fonte)
+
+  gasStation GasStation @relation(fields: [gasStationId], references: [id], onDelete: Cascade) // Se o posto for deletado, os preços somem
+  fuelType   FuelType   @relation(fields: [fuelTypeId], references: [id], onDelete: Restrict) // Não deletar tipo se houver preço
+  // reportedBy User      @relation("ReportedPrices", fields: [reportedById], references: [id], onDelete: SetNull) // Se o usuário for deletado, mantém o preço mas sem o reporter
+
+  stationPriceProposals StationPriceProposal[] // Link para as propostas DESTE preço
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  @@index([gasStationId, fuelTypeId, reportedAt]) // Índice para buscar preços recentes por posto e tipo
+  @@map("station_prices")
+}
+
+// --- NOVOS Modelos de Proposta/Revisão Específicos ---
+
+// Proposta para revisão de um GasStation
+model GasStationProposal {
+  id           String       @id @default(uuid())
+  gasStationId String // Link para o GasStation existente
+  proposerId   String // Usuário que criou o GasStation
+  status       ReviewStatus @default(PENDING) // Status da revisão
+
+  reasonType ProposalReasonType
+
+  // Armazena as *mudanças* propostas para DATA_UPDATE.
+  // Para INITIAL_CREATION, os dados estão no próprio GasStation.
+  proposedData Json?
+
+  reason          String? // Justificativa opcional do criador
+  resolutionNotes String? // Notas da resolução (ex: "Verificado por X votos")
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  // Relações
+  gasStation GasStation         @relation(fields: [gasStationId], references: [id], onDelete: Cascade) // Se posto sumir, proposta some
+  proposer   User               @relation("ProposedStations", fields: [proposerId], references: [id], onDelete: Cascade) // Se proposer sumir, proposta some
+  reviews    GasStationReview[] // Votos recebidos
+
+  @@unique([gasStationId]) // Só pode haver UMA proposta de revisão ativa por posto? Ou histórico? Se for só ativa, unique é bom.
+  @@index([status])
+  @@map("gas_station_proposals")
+}
+
+// Revisão (voto) em uma GasStationProposal
+model GasStationReview {
+  id                   String     @id @default(uuid())
+  gasStationProposalId String // Link para a proposta do posto
+  reviewerId           String // Usuário que está votando
+  vote                 ReviewVote
+  comment              String?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+  createdInApp         Boolean    @default(false)
+
+  // Relações
+  gasStationProposal GasStationProposal @relation(fields: [gasStationProposalId], references: [id], onDelete: Cascade) // Se proposta sumir, voto some
+  reviewer           User               @relation("GasStationReviewsMade", fields: [reviewerId], references: [id], onDelete: Cascade) // Se reviewer sumir, voto some
+
+  @@unique([gasStationProposalId, reviewerId]) // User só vota uma vez por proposta de posto
+  @@map("gas_station_reviews")
+}
+
+// Proposta para revisão de um StationPrice
+model StationPriceProposal {
+  id             String       @id @default(uuid())
+  stationPriceId String // Link para o StationPrice existente
+  proposerId     String // Usuário que reportou o preço (reportedById)
+  status         ReviewStatus @default(PENDING) // Status da revisão
+
+  reasonType ProposalReasonType
+
+  reason          String? // Justificativa (ex: "Preço na bomba", "Vi no app X")
+  resolutionNotes String?
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  createdInApp Boolean  @default(false)
+
+  // Relações
+  stationPrice StationPrice         @relation(fields: [stationPriceId], references: [id], onDelete: Cascade) // Se preço sumir, proposta some
+  proposer     User                 @relation("ProposedPrices", fields: [proposerId], references: [id], onDelete: Cascade) // Se proposer sumir, proposta some
+  reviews      StationPriceReview[] // Votos recebidos
+
+  @@unique([stationPriceId]) // Só UMA proposta por registro de preço? Faz sentido.
+  @@index([status])
+  @@map("station_price_proposals")
+}
+
+// Revisão (voto) em uma StationPriceProposal
+model StationPriceReview {
+  id                     String     @id @default(uuid())
+  stationPriceProposalId String // Link para a proposta do preço
+  reviewerId             String // Usuário que está votando
+  vote                   ReviewVote
+  comment                String?
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+  createdInApp           Boolean    @default(false)
+
+  // Relações
+  stationPriceProposal StationPriceProposal @relation(fields: [stationPriceProposalId], references: [id], onDelete: Cascade)
+  reviewer             User                 @relation("StationPriceReviewsMade", fields: [reviewerId], references: [id], onDelete: Cascade)
+
+  @@unique([stationPriceProposalId, reviewerId]) // User só vota uma vez por proposta de preço
+  @@map("station_price_reviews")
+}
