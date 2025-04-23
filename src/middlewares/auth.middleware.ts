@@ -27,8 +27,9 @@ export const protect: MiddlewareHandler<AuthVariables> = async (c, next) => {
 
     try {
         // 2. Verify token
-        const decoded = verifyToken(token); // Assuming verifyToken throws on error or returns null/undefined
-
+        const JWT_SECRET = c.env.JWT_SECRET || "seu_super_segredo_jwt_aqui";
+        const decoded = verifyToken(token, JWT_SECRET); // Assuming verifyToken throws on error or returns null/undefined
+        
         if (!decoded || !decoded.userId || !decoded.roleId) {
             throw new AppError('Não autorizado. Token inválido ou expirado.', 401);
             // OR: return c.json({ status: 'fail', message: 'Não autorizado. Token inválido ou expirado.' }, 401);

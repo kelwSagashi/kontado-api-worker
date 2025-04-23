@@ -1,4 +1,4 @@
-import { ZodError, AnyZodObject } from 'zod'
+import { ZodError, AnyZodObject, z } from 'zod'
 import { Context, Next } from 'hono'
 
 export const validate = (schema: AnyZodObject) =>
@@ -29,3 +29,18 @@ export const validate = (schema: AnyZodObject) =>
             throw error
         }
     }
+
+// --- Shared Validation Error Handler ---
+export const handleValidationFailure = (result: { success: boolean; error?: z.ZodError }, c: Context) => {
+    if (!result.success) {
+        const formattedErrors = result.error!.errors.map((err: any) => ({
+            path: err.path.join('.'),
+            message: err.message,
+        }));
+        return c.json({
+            status: 'fail',
+            message: 'Erro de validação.',
+            errors: formattedErrors,
+        }, 400);
+    }
+}
